@@ -1,0 +1,179 @@
+name: Build Security Support AAB
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Security Support.zip"
+      - "logo.png"
+      - ".github/workflows/main.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Extract website
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p website
+          unzip -o "Security Support.zip" -d website
+
+          INDEX_FILE="$(find website -type f -name index.html | head -n 1)"
+
+          if [ -z "$INDEX_FILE" ]; then
+            echo "ERROR: index.html not found in Security Support.zip"
+            exit 1
+          fi
+
+          WEBSITE_ROOT="$(dirname "$INDEX_FILE")"
+
+          mkdir -p www
+          cp -R "$WEBSITE_ROOT"/. www/
+
+          echo "Website files copied successfully."
+          ls -la www
+
+      - name: Create Capacitor project
+        shell: bash
+        run: |
+          set -e
+
+          npm init -y
+
+          npm install @capacitor/core@latest @capacitor/android@latest
+          npm install --save-dev @capacitor/cli@latest
+
+          npx cap init "Security Support" "com.securitysupport.app" --web-dir www
+          npx cap add android
+
+      - name: Set Existing Logo
+        shell: bash
+        run: |
+          set -e
+
+          if [ ! -f "logo.png" ]; then
+            echo "ERROR: logo.png not found in repository root."
+            exit 1
+          fi
+
+          mkdir -p android/app/src/main/res/drawable-nodpi
+
+          cp logo.png \
+            android/app/src/main/res/drawable-nodpi/security_support_logo.png
+
+          echo "Existing logo copied without modifying the image."
+
+      - name: Configure Android Back Button
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p android/app/src/main/java/com/securitysupport/app
+
+          cat > android/app/src/main/java/com/securitysupport/app/MainActivity.java <<'EOF'
+          package com.securitysupport.app;
+
+          import android.webkit.WebView;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+
+              @Override
+              @SuppressWarnings("deprecation")
+              public void onBackPressed() {
+                  if (getBridge() == null
+                      || getBridge().getWebView() == null) {
+                      super.onBackPressed();
+                      return;
+                  }
+
+                  WebView webView = getBridge().getWebView();
+
+                  if (webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      finish();
+                  }
+              }
+          }
+          EOF
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Configure App Icon Reference
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          text = manifest.read_text()
+
+          match = re.search(r'<application\b[^>]*>', text, re.DOTALL)
+
+          if not match:
+              raise SystemExit("ERROR: Android application tag not found.")
+
+          tag = match.group(0)
+
+          tag = re.sub(r'\s+android:icon="[^"]*"', '', tag)
+          tag = re.sub(r'\s+android:roundIcon="[^"]*"', '', tag)
+
+          tag = tag[:-1] + (
+              ' android:icon="@drawable/security_support_logo">'
+          )
+
+          text = text[:match.start()] + tag + text[match.end():]
+          manifest.write_text(text)
+
+          print("Existing logo reference configured.")
+          PY
+
+          test -f \
+            android/app/src/main/res/drawable-nodpi/security_support_logo.png
+
+      - name: Build Release AAB
+        shell: bash
+        run: |
+          set -e
+
+          cd android
+          chmod +x gradlew
+          ./gradlew bundleRelease
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: SecuritySupport-AAB
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 7
